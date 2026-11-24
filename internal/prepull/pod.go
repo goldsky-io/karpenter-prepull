@@ -14,6 +14,8 @@ const (
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 	// ManagedByValue is the value of ManagedByLabel on pull pods.
 	ManagedByValue = "karpenter-prepull"
+	// SourceLabel holds the UID of the draining node a pull pod works for.
+	SourceLabel = "karpenter-prepull.goldsky.com/source"
 
 	noopVolume = "noop"
 	noopDir    = "/karpenter-prepull"
@@ -29,22 +31,23 @@ type PodOptions struct {
 	NoopImage         string
 	HostNetwork       bool
 	PriorityClassName string
-	// DeadlineSeconds stops the pod on the node if the controller is gone.
+	// DeadlineSeconds bounds the time the pod may spend on the node.
 	DeadlineSeconds int64
 }
 
-// PodName is the name of the pull pod for a node.
-func PodName(node *corev1.Node) string {
+// PodName is the name of the pod that pulls, on node, the images of the pods
+// of the draining node source.
+func PodName(node, source *corev1.Node) string {
 	h := fnv.New64a()
-	h.Write([]byte(node.Name))
 	h.Write([]byte(node.UID))
+	h.Write([]byte(source.UID))
 	return fmt.Sprintf("prepull-%x", h.Sum64())
 }
 
 // BuildPod returns a pod bound to node with one container per image. Each
 // container runs the noop binary, so the pod succeeds once the kubelet has
 // pulled every image.
-func BuildPod(node *corev1.Node, images []string, opts PodOptions) *corev1.Pod {
+func BuildPod(node, source *corev1.Node, images []string, opts PodOptions) *corev1.Pod {
 	security := &corev1.SecurityContext{
 		RunAsUser:                ptr.To[int64](nonRootID),
 		RunAsGroup:               ptr.To[int64](nonRootID),
@@ -69,13 +72,14 @@ func BuildPod(node *corev1.Node, images []string, opts PodOptions) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: opts.Namespace,
-			Name:      PodName(node),
-			Labels:    map[string]string{ManagedByLabel: ManagedByValue},
+			Name:      PodName(node, source),
+			Labels:    map[string]string{ManagedByLabel: ManagedByValue, SourceLabel: string(source.UID)},
+			// The pod goes away with the drained node, when its result is no longer needed.
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "v1",
 				Kind:       "Node",
-				Name:       node.Name,
-				UID:        node.UID,
+				Name:       source.Name,
+				UID:        source.UID,
 			}},
 		},
 		Spec: corev1.PodSpec{

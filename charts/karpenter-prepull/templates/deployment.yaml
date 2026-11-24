@@ -43,8 +43,8 @@ spec:
           image: {{ $image }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - --startup-taint-key={{ .Values.startupTaintKey }}
             - --timeout={{ .Values.timeout }}
+            - --target-node-max-age={{ .Values.targetNodeMaxAge }}
             - --max-images={{ .Values.maxImages }}
             - --host-network={{ .Values.pullPod.hostNetwork }}
             {{- with .Values.ignoreTaintKeys }}
@@ -68,6 +68,8 @@ spec:
               containerPort: 8080
             - name: probes
               containerPort: 8081
+            - name: webhook
+              containerPort: 9443
           livenessProbe:
             httpGet:
               path: /healthz
@@ -83,6 +85,14 @@ spec:
               drop: ["ALL"]
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/karpenter-prepull/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Release.Name }}-webhook
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
