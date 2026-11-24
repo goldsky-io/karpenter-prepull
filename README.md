@@ -50,11 +50,12 @@ PodDisruptionBudget blocks. Karpenter and `kubectl drain` both retry it.
 
 ### Which nodes it warms
 
-The controller acts on a node when both are true:
+The controller acts on a node when all of these are true:
 
 - The node carries the `karpenter.sh/disrupted` taint.
-- Its NodeClaim has the `DisruptionReason` condition. Karpenter sets it for drift and consolidation, where it starts
-  the replacement first.
+- Its NodeClaim has the `DisruptionReason` condition with the reason `Drifted`, `Underutilized` or `Empty`. Karpenter
+  starts the replacement first in those cases. An unhealthy node is left alone, so that it drains without delay.
+- Its NodePool is in `nodePools`, when that list is set. Drains in other NodePools are not warmed for and not held.
 
 It then warms every node that is younger than `targetNodeMaxAge` (default `15m`) and is not itself disrupted,
 cordoned or being deleted. A replacement node is always in that set. Set `targetNodeMaxAge` to `0` to warm every node
@@ -95,6 +96,7 @@ That is all. The chart creates the webhook and a self-signed certificate for it.
 
 | Chart value | Default | Meaning |
 | -- | -- | -- |
+| `nodePools` | `[]` | Names of the NodePools to act on. Empty means every NodePool. |
 | `timeout` | `2m` | Longest time evictions are held after a drain starts. Also the deadline of a pull pod. |
 | `targetNodeMaxAge` | `15m` | Warm only nodes younger than this. `0` warms every node the pods fit. |
 | `maxImages` | `30` | Most images one pull pod pulls. |
@@ -103,6 +105,8 @@ That is all. The chart creates the webhook and a self-signed certificate for it.
 | `pullPod.hostNetwork` | `false` | Run pull pods on the host network. |
 | `pullPod.priorityClassName` | `""` | Priority class of the pull pods. |
 | `replicas` | `2` | Replicas. One starts pull pods. All serve the webhook. |
+| `otlp.endpoint` | `""` | Base URL of an OTLP/HTTP endpoint for the metrics. |
+| `extraEnv` | `[]` | Extra environment variables for the controller. |
 
 **Startup taints of other components.** If a NodePool has startup taints (a CNI or CSI agent, for example), list
 their keys in `ignoreTaintKeys`. A new node still carries those taints when the controller looks at it. Without the
@@ -116,15 +120,21 @@ no-op binary, as a non-root user, with no capabilities and a read-only root file
 
 ## Operate it
 
-**Metrics.** Each replica serves Prometheus metrics on port `8080`.
+**Metrics.** Each replica serves Prometheus metrics on port `8080`. Set `otlp.endpoint` to also push the same
+metrics over OTLP/HTTP, for example to an OpenTelemetry Collector. The other standard `OTEL_*` variables, such as
+`OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_RESOURCE_ATTRIBUTES`, work through `extraEnv`.
 
-| Metric | Meaning |
-| -- | -- |
-| `karpenter_prepull_pull_pods_created_total` | Pull pods created. |
-| `karpenter_prepull_images_requested_total` | Images that pull pods were asked to pull. |
-| `karpenter_prepull_evictions_total{decision}` | Evictions from nodes that Karpenter drains by choice. `decision` is `allowed`, `held` or `timeout`. |
+| Prometheus name | OTLP name | Meaning |
+| -- | -- | -- |
+| `karpenter_prepull_pull_pods_created_total` | `karpenter_prepull.pull_pods.created` | Pull pods created. |
+| `karpenter_prepull_images_requested_total` | `karpenter_prepull.images.requested` | Images that pull pods were asked to pull. |
+| `karpenter_prepull_evictions_total` | `karpenter_prepull.evictions` | Evictions from nodes that Karpenter drains by choice. `decision` is `allowed`, `held` or `timeout`. |
+| `karpenter_prepull_eviction_wait_seconds` | `karpenter_prepull.eviction.wait` | Histogram. Time from the start of a drain to an eviction that was let through. |
 
-A rising `timeout` count means pulls are slower than `timeout`. The evictions pass anyway.
+Every metric has a `nodepool` attribute with the NodePool of the draining node.
+
+A rising `timeout` count means pulls are slower than `timeout`. The evictions pass anyway. The wait histogram shows
+how much time the hold adds to a drain.
 
 **Events.** The controller records `PrepullStarted` and `PrepullFailed` events on the old node. While an eviction is
 held, Karpenter reports `FailedDraining` on the node with a PodDisruptionBudget message. That is how Karpenter words

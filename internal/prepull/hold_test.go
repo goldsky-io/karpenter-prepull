@@ -44,7 +44,7 @@ func newHarness(t *testing.T, reason string, pods ...corev1.Pod) *harness {
 	source := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 		Name:              "old",
 		UID:               "old-uid",
-		Labels:            map[string]string{"pool": "pipelines"},
+		Labels:            map[string]string{"pool": "pipelines", NodePoolLabel: "pipelines"},
 		CreationTimestamp: metav1.NewTime(now.Add(-24 * time.Hour)),
 		OwnerReferences:   []metav1.OwnerReference{{APIVersion: "karpenter.sh/v1", Kind: "NodeClaim", Name: "old-claim", UID: "c"}},
 	}}
@@ -317,6 +317,26 @@ func TestEvictionIsNotHeldForAnImageThePullPodLeavesOut(t *testing.T) {
 	}
 	if got := h.evict("a"); got != http.StatusTooManyRequests {
 		t.Errorf("eviction of a pod whose image is in the pull pod = %d, want 429", got)
+	}
+}
+
+func TestNodeOutsideTheSelectedNodePoolsIsLeftAlone(t *testing.T) {
+	h := newHarness(t, "Drifted", testPod("app", nil, "app:1"))
+	h.r.Options.NodePools = []string{"web"}
+
+	h.reconcile()
+	h.startDrain()
+
+	if pods := h.pullPods(); len(pods) != 0 {
+		t.Errorf("pull pods = %d, want none for a NodePool that is not selected", len(pods))
+	}
+	if got := h.evict("app"); got != http.StatusOK {
+		t.Errorf("eviction from a NodePool that is not selected = %d, want it allowed", got)
+	}
+
+	h.r.Options.NodePools = []string{"web", "pipelines"}
+	if got := h.evict("app"); got != http.StatusTooManyRequests {
+		t.Errorf("eviction from a selected NodePool at the start of the drain = %d, want 429", got)
 	}
 }
 

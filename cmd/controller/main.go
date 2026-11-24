@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -31,6 +32,7 @@ func main() {
 	var (
 		opts         prepull.Options
 		ignoreTaints string
+		nodePools    string
 		metricsAddr  string
 		probeAddr    string
 		certDir      string
@@ -46,6 +48,8 @@ func main() {
 		"Warm only nodes younger than this. Zero warms every node the pods of a draining node fit.")
 	flag.StringVar(&ignoreTaints, "ignore-taint-keys", "",
 		"Comma-separated startup taint keys of other components, ignored when matching pods to a new node.")
+	flag.StringVar(&nodePools, "nodepools", "",
+		"Comma-separated names of the Karpenter NodePools to act on. Empty means every NodePool.")
 	flag.StringVar(&opts.Pod.Namespace, "namespace", os.Getenv("POD_NAMESPACE"), "Namespace of the pull pods.")
 	flag.StringVar(&opts.Pod.NoopImage, "noop-image", os.Getenv("NOOP_IMAGE"),
 		"Image that holds /noop for every node architecture. Normally the image of this controller.")
@@ -70,6 +74,9 @@ func main() {
 	}
 	if ignoreTaints != "" {
 		opts.IgnoreTaintKeys = strings.Split(ignoreTaints, ",")
+	}
+	if nodePools != "" {
+		opts.NodePools = strings.Split(nodePools, ",")
 	}
 	opts.Pod.DeadlineSeconds = int64(opts.Timeout.Seconds())
 
@@ -133,8 +140,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting", "timeout", opts.Timeout.String(), "targetNodeMaxAge", opts.TargetMaxAge.String())
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	ctx := ctrl.SetupSignalHandler()
+	stopMetrics, err := prepull.SetupMetrics(ctx, metrics.Registry)
+	if err != nil {
+		log.Error(err, "set up metrics")
+		os.Exit(1)
+	}
+
+	log.Info("starting", "timeout", opts.Timeout.String(), "targetNodeMaxAge", opts.TargetMaxAge.String(),
+		"nodePools", opts.NodePools)
+	err = mgr.Start(ctx)
+	// The last interval of metrics is pushed on the way out.
+	flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if stopErr := stopMetrics(flush); stopErr != nil {
+		log.Error(stopErr, "flush metrics")
+	}
+	if err != nil {
 		log.Error(err, "run manager")
 		os.Exit(1)
 	}

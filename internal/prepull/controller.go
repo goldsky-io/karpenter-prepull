@@ -3,7 +3,7 @@ package prepull
 import (
 	"context"
 
-	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/metric"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -13,28 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
-
-var (
-	pullPodsCreated = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "karpenter_prepull_pull_pods_created_total",
-		Help: "Pull pods created.",
-	})
-	imagesRequested = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "karpenter_prepull_images_requested_total",
-		Help: "Images that pull pods were asked to pull.",
-	})
-	evictions = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "karpenter_prepull_evictions_total",
-		Help: "Evictions from nodes Karpenter drains by choice, by decision.",
-	}, []string{"decision"})
-)
-
-func init() {
-	metrics.Registry.MustRegister(pullPodsCreated, imagesRequested, evictions)
-}
 
 // Reconciler starts pull pods for every node Karpenter is about to drain.
 type Reconciler struct {
@@ -87,7 +67,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Client.Get(ctx, req.NamespacedName, source); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	byChoice, err := r.DisruptedByChoice(ctx, source)
+	byChoice, err := r.Eligible(ctx, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -129,8 +109,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				"could not create the pull pod for node %s: %v", target.Name, err)
 			continue
 		}
-		pullPodsCreated.Inc()
-		imagesRequested.Add(float64(len(prediction.Images)))
+		pullPodsCreated.Add(ctx, 1, metric.WithAttributes(nodePoolAttr(source)))
+		imagesRequested.Add(ctx, int64(len(prediction.Images)), metric.WithAttributes(nodePoolAttr(source)))
 		log.FromContext(ctx).Info("started pull", "target", target.Name, "pod", pod.Name, "images", prediction.Images,
 			"truncated", prediction.Truncated, "podsNeedingPullSecrets", prediction.NeedSecrets,
 			"unpullableImages", prediction.Unpullable)

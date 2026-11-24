@@ -47,6 +47,9 @@ spec:
             - --target-node-max-age={{ .Values.targetNodeMaxAge }}
             - --max-images={{ .Values.maxImages }}
             - --host-network={{ .Values.pullPod.hostNetwork }}
+            {{- with .Values.nodePools }}
+            - --nodepools={{ join "," . }}
+            {{- end }}
             {{- with .Values.ignoreTaintKeys }}
             - --ignore-taint-keys={{ join "," . }}
             {{- end }}
@@ -63,6 +66,13 @@ spec:
                   fieldPath: metadata.namespace
             - name: NOOP_IMAGE
               value: {{ $image }}
+            {{- with .Values.otlp.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080

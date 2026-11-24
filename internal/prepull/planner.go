@@ -5,6 +5,7 @@ package prepull
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +41,10 @@ type Options struct {
 	// IgnoreTaintKeys are startup taints of other components. They do not
 	// stop a pod from counting as a future tenant of a new node.
 	IgnoreTaintKeys []string
-	Pod             PodOptions
+	// NodePools limits the nodes whose drains are warmed for and held to
+	// those of the named Karpenter NodePools. Empty means every NodePool.
+	NodePools []string
+	Pod       PodOptions
 }
 
 // Planner holds the rules the controller and the webhook share.
@@ -53,11 +57,15 @@ type Planner struct {
 	Options   Options
 }
 
-// DisruptedByChoice reports whether Karpenter marked the node for a disruption
-// in which it starts the replacement nodes before the drain. Spot interruption
-// and expiry drain at once, so there is nothing to wait for.
-func (p *Planner) DisruptedByChoice(ctx context.Context, node *corev1.Node) (bool, error) {
+// Eligible reports whether to act on the node: it is in scope, and Karpenter
+// marked it for a disruption in which it starts the replacement nodes before
+// the drain. Spot interruption and expiry drain at once, so there is nothing
+// to wait for.
+func (p *Planner) Eligible(ctx context.Context, node *corev1.Node) (bool, error) {
 	if !hasTaint(node, p.Options.DisruptionTaintKey) {
+		return false, nil
+	}
+	if len(p.Options.NodePools) > 0 && !slices.Contains(p.Options.NodePools, node.Labels[NodePoolLabel]) {
 		return false, nil
 	}
 	for _, owner := range node.OwnerReferences {
