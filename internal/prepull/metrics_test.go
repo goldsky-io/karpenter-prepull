@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 
@@ -63,7 +64,8 @@ func TestMetricsReachPrometheusAndOTLP(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, name := range []string{"karpenter_prepull.evictions", "karpenter_prepull.eviction.wait", "karpenter-prepull"} {
+	host, _ := os.Hostname()
+	for _, name := range []string{"karpenter_prepull.evictions", "karpenter_prepull.eviction.wait", "karpenter-prepull", "service.instance.id", host} {
 		if !bytes.Contains(pushed, []byte(name)) {
 			t.Errorf("the OTLP push lacks %q", name)
 		}

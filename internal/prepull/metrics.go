@@ -44,8 +44,18 @@ func nodePoolAttr(node *corev1.Node) attribute.KeyValue {
 // standard OTEL_EXPORTER_OTLP_* environment variables. The returned function
 // flushes and stops the export.
 func SetupMetrics(ctx context.Context, registry promclient.Registerer) (func(context.Context) error, error) {
+	// Every replica pushes its own counters, so each needs its own identity.
+	// In a pod the host name is the pod name.
+	pod, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
 	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName("karpenter-prepull")),
+		resource.WithAttributes(
+			semconv.ServiceName("karpenter-prepull"),
+			semconv.ServiceInstanceID(pod),
+			semconv.K8SPodName(pod),
+		),
 		resource.WithFromEnv(),
 	)
 	if err != nil {
