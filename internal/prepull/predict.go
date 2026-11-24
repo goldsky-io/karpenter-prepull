@@ -16,6 +16,14 @@ var transientTaintPrefixes = []string{
 	"karpenter.sh/",
 }
 
+// Waiting reasons the kubelet reports when it cannot get an image.
+var imagePullFailures = map[string]bool{
+	"ErrImagePull":      true,
+	"ImagePullBackOff":  true,
+	"InvalidImageName":  true,
+	"ErrImageNeverPull": true,
+}
+
 // Prediction is the set of images the pull pod fetches on a new node.
 type Prediction struct {
 	// Images are ordered by how many containers use them, most used first.
@@ -25,6 +33,10 @@ type Prediction struct {
 	// NeedSecrets counts pods skipped because they use imagePullSecrets,
 	// which the pull pod cannot read from another namespace.
 	NeedSecrets int
+	// Unpullable counts images skipped because a pod on a disrupted node
+	// already fails to pull them. Such a pull would hold the node until the
+	// timeout for no gain.
+	Unpullable int
 }
 
 // Predict returns the images of the pods that could move from the disrupted
@@ -39,6 +51,7 @@ func Predict(target *corev1.Node, pods []corev1.Pod, ignoreTaintKeys map[string]
 	}
 
 	uses := map[string]int{}
+	unpullable := map[string]bool{}
 	for i := range pods {
 		pod := &pods[i]
 		if !movable(pod) || !fits(pod, target, ignoreTaintKeys) {
@@ -48,16 +61,30 @@ func Predict(target *corev1.Node, pods []corev1.Pod, ignoreTaintKeys map[string]
 			p.NeedSecrets++
 			continue
 		}
-		for _, c := range pod.Spec.InitContainers {
-			uses[c.Image]++
+		failing := map[string]bool{}
+		for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+			for _, status := range statuses {
+				if w := status.State.Waiting; w != nil && imagePullFailures[w.Reason] {
+					failing[status.Name] = true
+				}
+			}
 		}
-		for _, c := range pod.Spec.Containers {
-			uses[c.Image]++
+		for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+			for _, c := range containers {
+				uses[c.Image]++
+				if failing[c.Name] {
+					unpullable[c.Image] = true
+				}
+			}
 		}
 	}
 
 	for image := range uses {
-		if image != "" && !present[image] {
+		switch {
+		case image == "" || present[image]:
+		case unpullable[image]:
+			p.Unpullable++
+		default:
 			p.Images = append(p.Images, image)
 		}
 	}
