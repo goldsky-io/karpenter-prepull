@@ -58,7 +58,7 @@ The controller acts on a node when both are true:
 
 It then warms every node that is younger than `targetNodeMaxAge` (default `15m`) and is not itself disrupted,
 cordoned or being deleted. A replacement node is always in that set. Set `targetNodeMaxAge` to `0` to warm every node
-that the pods fit.
+that the pods fit. A node that appears after the drain started is never a target, so it cannot extend a hold.
 
 ### Which images it pulls
 
@@ -72,13 +72,15 @@ out an image that a pod already fails to pull.
 The webhook holds an eviction only while a pull pod for that pod's images is running. In every other case the
 eviction passes:
 
-- No pull pod exists, for example because the controller is down or an admission policy rejected the pull pod.
+- No pull pod exists 15 seconds after the drain started, for example because the controller is down or an admission
+  policy rejected the pull pod.
 - The pull pod finished or failed.
 - More than `timeout` (default `2m`) passed since the drain started.
 - The pod is not part of a Karpenter drift or consolidation.
 
 The webhook is registered with `failurePolicy: Ignore` and a 2-second timeout. If no replica answers, the API server
-lets the eviction pass. So an outage of `karpenter-prepull` costs the warm-up and nothing else.
+lets the eviction pass. So an outage of `karpenter-prepull` costs the warm-up and nothing else. If only the
+controller is down and the webhook still answers, a drain is held for 15 seconds at most.
 
 ## Install
 
@@ -136,6 +138,8 @@ every 429 answer.
   starts no replacement first, so there is no node to warm.
 - **Only new nodes are warmed by default.** The scheduler places the evicted pods. A pod that lands on an older node
   pulls its images there. `targetNodeMaxAge: 0` removes this limit at the cost of more pulls.
+- **A node that appears during the drain is not warmed.** Sometimes an evicted pod fits nowhere and Karpenter starts
+  a node for it after the eviction. That node did not exist when the pod was evicted.
 - **Pods with `imagePullSecrets` are skipped.** The pull pod cannot read a secret of another namespace. Images that
   the node can pull with its own credentials work, for example through a kubelet credential provider.
 - **`imagePullPolicy: Always` still contacts the registry.** The layers are cached, so the pull is short. If a

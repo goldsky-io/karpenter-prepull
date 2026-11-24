@@ -91,6 +91,9 @@ func (p *Planner) Targets(ctx context.Context, source *corev1.Node) ([]corev1.No
 	for _, node := range nodes.Items {
 		switch {
 		case node.Name == source.Name:
+		// Karpenter waits for the replacement before the drain, so a node that
+		// appears during the drain is not one. Waiting for it would extend the hold.
+		case !source.DeletionTimestamp.IsZero() && node.CreationTimestamp.After(source.DeletionTimestamp.Time):
 		case !node.DeletionTimestamp.IsZero() || node.Spec.Unschedulable:
 		case hasTaint(&node, p.Options.DisruptionTaintKey):
 		case node.Labels[corev1.LabelOSStable] != "" && node.Labels[corev1.LabelOSStable] != "linux":

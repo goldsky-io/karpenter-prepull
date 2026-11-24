@@ -179,6 +179,33 @@ func TestNoPullWhenKarpenterDrainsWithoutAReplacement(t *testing.T) {
 	}
 }
 
+func TestNodeThatAppearsDuringTheDrainIsNotATarget(t *testing.T) {
+	h := newHarness(t, "Drifted", testPod("app", nil, "app:1"))
+	h.startDrain()
+	late := targetNode()
+	late.Name, late.UID = "late", "late-uid"
+	late.CreationTimestamp = metav1.NewTime(h.clock.Now().Add(30 * time.Second))
+	if err := h.client.Create(context.Background(), late); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.Step(time.Minute)
+
+	h.reconcile()
+
+	for _, pod := range h.pullPods() {
+		if pod.Spec.NodeName == "late" {
+			t.Error("a pull pod runs on a node that appeared after the drain started")
+		}
+	}
+	if got := h.evict("app"); got != http.StatusTooManyRequests {
+		t.Errorf("eviction while the pull on the first new node runs = %d, want 429", got)
+	}
+	h.finishPulls(corev1.PodSucceeded)
+	if got := h.evict("app"); got != http.StatusOK {
+		t.Errorf("eviction after that pull = %d, want it allowed without a wait for the late node", got)
+	}
+}
+
 func TestNoPullOnANodeThatIsNotNew(t *testing.T) {
 	h := newHarness(t, "Drifted", testPod("app", nil, "app:1"))
 	h.clock.Step(time.Hour)
@@ -249,13 +276,19 @@ func TestEvictionIsAllowedAfterTheTimeout(t *testing.T) {
 	}
 }
 
-func TestEvictionIsAllowedWithoutAPullPod(t *testing.T) {
-	// The controller is down or its pull pod was rejected: nothing may be held.
+func TestEvictionWaitsOnlyBrieflyForAPullPodThatDoesNotExist(t *testing.T) {
+	// Karpenter can drain in the same second it taints, before the controller acts.
 	h := newHarness(t, "Drifted", testPod("app", nil, "app:1"))
 	h.startDrain()
 
+	if got := h.evict("app"); got != http.StatusTooManyRequests {
+		t.Errorf("eviction at the start of the drain = %d, want 429", got)
+	}
+
+	// The controller is down, or its pull pod was rejected.
+	h.clock.Step(pullStartGrace)
 	if got := h.evict("app"); got != http.StatusOK {
-		t.Errorf("eviction with no pull pod = %d, want it allowed", got)
+		t.Errorf("eviction with no pull pod after the grace = %d, want it allowed", got)
 	}
 }
 

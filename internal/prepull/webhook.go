@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -21,12 +22,17 @@ const (
 	DecisionTimeout = "timeout"
 )
 
+// pullStartGrace is how long after the start of a drain the webhook waits for
+// a pull pod that does not exist yet.
+const pullStartGrace = 15 * time.Second
+
 // EvictionHold is a validating webhook for pod evictions. It refuses the
 // eviction of a pod from a node Karpenter drains by choice while a pull pod
 // still fetches that pod's images on a node the pod can move to.
 //
 // Every doubt resolves to "allow". With failurePolicy Ignore on the webhook
 // configuration, an outage of this webhook leaves Karpenter as it is without it.
+// An outage of the controller alone holds a drain for pullStartGrace at most.
 type EvictionHold struct {
 	*Planner
 }
@@ -86,20 +92,25 @@ func (h *EvictionHold) waitingOn(ctx context.Context, source *corev1.Node, pod *
 	if err != nil {
 		return "", err
 	}
+	// Karpenter can taint and drain a node in the same second, before the pull pods exist.
+	early := h.Clock.Since(source.DeletionTimestamp.Time) < pullStartGrace
 	for i := range targets {
 		target := &targets[i]
+		if len(h.Missing(target, []corev1.Pod{*pod}, 0).Images) == 0 {
+			continue
+		}
 		pull := &corev1.Pod{}
 		key := types.NamespacedName{Namespace: h.Options.Pod.Namespace, Name: PodName(target, source)}
 		if err := h.Client.Get(ctx, key, pull); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
+			if !apierrors.IsNotFound(err) {
+				return "", err
 			}
-			return "", err
-		}
-		if terminal(pull) || !pull.DeletionTimestamp.IsZero() {
+			if early {
+				return target.Name, nil
+			}
 			continue
 		}
-		if len(h.Missing(target, []corev1.Pod{*pod}, 0).Images) > 0 {
+		if !terminal(pull) && pull.DeletionTimestamp.IsZero() {
 			return target.Name, nil
 		}
 	}
