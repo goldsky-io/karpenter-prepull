@@ -96,7 +96,8 @@ func (h *EvictionHold) waitingOn(ctx context.Context, source *corev1.Node, pod *
 	early := h.Clock.Since(source.DeletionTimestamp.Time) < pullStartGrace
 	for i := range targets {
 		target := &targets[i]
-		if len(h.Missing(target, []corev1.Pod{*pod}, 0).Images) == 0 {
+		missing := h.Missing(target, []corev1.Pod{*pod}, 0).Images
+		if len(missing) == 0 {
 			continue
 		}
 		pull := &corev1.Pod{}
@@ -110,9 +111,22 @@ func (h *EvictionHold) waitingOn(ctx context.Context, source *corev1.Node, pod *
 			}
 			continue
 		}
-		if !terminal(pull) && pull.DeletionTimestamp.IsZero() {
+		if !terminal(pull) && pull.DeletionTimestamp.IsZero() && pulls(pull, missing) {
 			return target.Name, nil
 		}
 	}
 	return "", nil
+}
+
+// pulls reports whether the pull pod fetches one of images. The max-images
+// limit can leave the images of a pod out of the pull pod.
+func pulls(pull *corev1.Pod, images []string) bool {
+	for _, c := range pull.Spec.Containers {
+		for _, image := range images {
+			if c.Image == image {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -18,9 +18,12 @@ import (
 // NodeClaimGVK is the Karpenter resource that owns a node.
 var NodeClaimGVK = schema.GroupVersionKind{Group: "karpenter.sh", Version: "v1", Kind: "NodeClaim"}
 
-// Karpenter sets this NodeClaim condition when it disrupts a node by choice
-// (drift, consolidation), which is when it starts replacement nodes first.
+// Karpenter sets this NodeClaim condition when it disrupts a node by choice,
+// which is when it starts replacement nodes first.
 const disruptionReasonCondition = "DisruptionReason"
+
+// An unhealthy node is also disrupted by choice, but it must drain without delay.
+var chosenDisruptions = map[string]bool{"Drifted": true, "Underutilized": true, "Empty": true}
 
 // Options configures the controller and the webhook.
 type Options struct {
@@ -72,9 +75,11 @@ func (p *Planner) DisruptedByChoice(ctx context.Context, node *corev1.Node) (boo
 		conditions, _, _ := unstructured.NestedSlice(claim.Object, "status", "conditions")
 		for _, c := range conditions {
 			condition, ok := c.(map[string]any)
-			if ok && condition["type"] == disruptionReasonCondition && condition["status"] == "True" {
-				return true, nil
+			if !ok || condition["type"] != disruptionReasonCondition || condition["status"] != "True" {
+				continue
 			}
+			reason, _ := condition["reason"].(string)
+			return chosenDisruptions[reason], nil
 		}
 	}
 	return false, nil

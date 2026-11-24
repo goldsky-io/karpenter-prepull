@@ -304,3 +304,32 @@ func TestEvictionOfAPodThatNeedsNoPullIsNotHeld(t *testing.T) {
 		t.Errorf("eviction of a pod that cannot move to the new node = %d, want it allowed", got)
 	}
 }
+
+func TestEvictionIsNotHeldForAnImageThePullPodLeavesOut(t *testing.T) {
+	h := newHarness(t, "Drifted", testPod("a", nil, "a:1"), testPod("b", nil, "a:1"), testPod("z", nil, "z:1"))
+	h.r.Options.MaxImages = 1
+	h.reconcile()
+	h.startDrain()
+	h.clock.Step(pullStartGrace)
+
+	if got := h.evict("z"); got != http.StatusOK {
+		t.Errorf("eviction of a pod whose image is not in the pull pod = %d, want it allowed", got)
+	}
+	if got := h.evict("a"); got != http.StatusTooManyRequests {
+		t.Errorf("eviction of a pod whose image is in the pull pod = %d, want 429", got)
+	}
+}
+
+func TestUnhealthyNodeIsNeitherWarmedForNorHeld(t *testing.T) {
+	h := newHarness(t, "Unhealthy", testPod("app", nil, "app:1"))
+
+	h.reconcile()
+	h.startDrain()
+
+	if pods := h.pullPods(); len(pods) != 0 {
+		t.Errorf("pull pods = %d, want none for an unhealthy node", len(pods))
+	}
+	if got := h.evict("app"); got != http.StatusOK {
+		t.Errorf("eviction from an unhealthy node = %d, want it allowed", got)
+	}
+}
