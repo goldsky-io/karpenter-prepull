@@ -1,0 +1,9 @@
+apiVersion: v2
+name: karpenter-prepull
+description: Pre-pulls images on Karpenter replacement nodes before the old node drains.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/goldsky-io/karpenter-prepull
+sources:
+  - https://github.com/goldsky-io/karpenter-prepull

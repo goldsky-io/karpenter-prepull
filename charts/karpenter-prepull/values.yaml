@@ -1,0 +1,57 @@
+image:
+  repository: ghcr.io/goldsky-io/karpenter-prepull
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Two replicas with leader election. While no replica runs, new nodes of the
+# gated NodePools keep their startup taint.
+replicas: 2
+
+# Startup taint that gates a node. List the same key under startupTaints of
+# each NodePool to gate.
+startupTaintKey: karpenter-prepull.goldsky.com/pending
+
+# Longest time a pull may hold a node. The node is released when it passes.
+timeout: 2m
+
+# Most images one pull pod pulls.
+maxImages: 30
+
+# Startup taint keys of other components (a CNI or CSI agent, for example).
+# Without this, a pod that does not tolerate such a taint is not counted as a
+# future tenant of the new node.
+ignoreTaintKeys: []
+
+pullPod:
+  # A host network pod does not wait for the CNI to give it an IP, which saves
+  # time on a node that is still starting. The baseline Pod Security Standard
+  # forbids host network pods, so this is off by default.
+  hostNetwork: false
+  priorityClassName: ""
+
+extraArgs: []
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+serviceAccount:
+  annotations: {}
