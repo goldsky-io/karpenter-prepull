@@ -118,12 +118,17 @@ func (h *EvictionHold) waitingOn(ctx context.Context, source *corev1.Node, pod *
 	return "", nil
 }
 
-// pulls reports whether the pull pod fetches one of images. The max-images
-// limit can leave the images of a pod out of the pull pod.
+// pulls reports whether the pull pod still has to fetch one of images. The
+// max-images limit can leave an image out of the pull pod, and the kubelet
+// starts the container of an image as soon as that image is pulled.
 func pulls(pull *corev1.Pod, images []string) bool {
+	started := map[string]bool{}
+	for _, status := range pull.Status.ContainerStatuses {
+		started[status.Name] = status.State.Running != nil || status.State.Terminated != nil
+	}
 	for _, c := range pull.Spec.Containers {
 		for _, image := range images {
-			if c.Image == image {
+			if c.Image == image && !started[c.Name] {
 				return true
 			}
 		}

@@ -333,3 +333,32 @@ func TestUnhealthyNodeIsNeitherWarmedForNorHeld(t *testing.T) {
 		t.Errorf("eviction from an unhealthy node = %d, want it allowed", got)
 	}
 }
+
+func TestEvictionIsAllowedOnceThePodsOwnImagesArePulled(t *testing.T) {
+	h := newHarness(t, "Drifted", testPod("a", nil, "a:1"), testPod("b", nil, "a:1"), testPod("z", nil, "z:1"))
+	h.reconcile()
+	h.startDrain()
+
+	// The pull pod has fetched a:1 and still fetches z:1.
+	pull := h.pullPods()[0]
+	pull.Status.Phase = corev1.PodRunning
+	for _, c := range pull.Spec.Containers {
+		status := corev1.ContainerStatus{Name: c.Name}
+		if c.Image == "a:1" {
+			status.State.Terminated = &corev1.ContainerStateTerminated{}
+		} else {
+			status.State.Waiting = &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}
+		}
+		pull.Status.ContainerStatuses = append(pull.Status.ContainerStatuses, status)
+	}
+	if err := h.client.Status().Update(context.Background(), &pull); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := h.evict("a"); got != http.StatusOK {
+		t.Errorf("eviction of a pod whose image is pulled = %d, want it allowed", got)
+	}
+	if got := h.evict("z"); got != http.StatusTooManyRequests {
+		t.Errorf("eviction of a pod whose image still pulls = %d, want 429", got)
+	}
+}
