@@ -10,6 +10,10 @@ imagePullSecrets: []
 # While no replica runs, Karpenter drains nodes as it does without this chart.
 replicas: 2
 
+# Names of the Karpenter NodePools to act on. Empty means every NodePool.
+# Drains of nodes in other NodePools are not warmed for and not held.
+nodePools: []
+
 # Longest time evictions are held after a drain starts.
 timeout: 2m
 
@@ -36,7 +40,15 @@ pullPod:
   hostNetwork: false
   priorityClassName: ""
 
+otlp:
+  # Base URL of an OTLP/HTTP endpoint, for example http://collector:4318.
+  # When set, the metrics are also pushed there. The Prometheus endpoint stays.
+  endpoint: ""
+
 extraArgs: []
+
+# Extra environment variables, for example other OTEL_* settings.
+extraEnv: []
 
 resources:
   requests:

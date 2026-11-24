@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -58,21 +60,25 @@ func (h *EvictionHold) Handle(ctx context.Context, req admission.Request) admiss
 	if source.DeletionTimestamp.IsZero() {
 		return admission.Allowed("")
 	}
-	if byChoice, err := h.DisruptedByChoice(ctx, source); err != nil || !byChoice {
+	if eligible, err := h.Eligible(ctx, source); err != nil || !eligible {
 		return admission.Allowed("")
 	}
 
+	pool := nodePoolAttr(source)
+	sinceDrain := h.Clock.Since(source.DeletionTimestamp.Time)
 	waiting, err := h.waitingOn(ctx, source, pod)
 	if err != nil || waiting == "" {
-		evictions.WithLabelValues(DecisionAllowed).Inc()
+		evictions.Add(ctx, 1, metric.WithAttributes(attribute.String("decision", DecisionAllowed), pool))
+		evictionWait.Record(ctx, sinceDrain.Seconds(), metric.WithAttributes(pool))
 		return admission.Allowed("")
 	}
-	if h.Clock.Since(source.DeletionTimestamp.Time) >= h.Options.Timeout {
-		evictions.WithLabelValues(DecisionTimeout).Inc()
+	if sinceDrain >= h.Options.Timeout {
+		evictions.Add(ctx, 1, metric.WithAttributes(attribute.String("decision", DecisionTimeout), pool))
+		evictionWait.Record(ctx, sinceDrain.Seconds(), metric.WithAttributes(pool))
 		log.FromContext(ctx).Info("hold timed out", "pod", req.Namespace+"/"+req.Name, "node", source.Name, "waitingOn", waiting)
 		return admission.Allowed("")
 	}
-	evictions.WithLabelValues(DecisionHeld).Inc()
+	evictions.Add(ctx, 1, metric.WithAttributes(attribute.String("decision", DecisionHeld), pool))
 	// Karpenter and kubectl treat 429 as "try again", as they do for a
 	// PodDisruptionBudget.
 	return admission.Response{AdmissionResponse: admissionv1.AdmissionResponse{
