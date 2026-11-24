@@ -44,7 +44,8 @@ The controller needs no access to the container runtime and runs no agent on the
 The controller looks at every node that carries the `karpenter.sh/disrupted` taint. It takes the pods on those nodes
 that could run on the new node: the node selector and the required node affinity match, and the pod tolerates the
 taints of the new node. It skips DaemonSet pods, static pods and finished pods. It pulls the images of the remaining
-pods that the new node does not hold, most used first.
+pods that the new node does not hold, most used first. It leaves out an image that a pod on a disrupted node
+already fails to pull, because that pull would hold the node until the timeout.
 
 A node that starts while no node is disrupted is released at once. A scale-up node is not delayed.
 
@@ -137,7 +138,8 @@ kubectl taint node <node> karpenter-prepull.goldsky.com/pending-
 - **Forceful disruption is not covered.** Spot interruption and node expiry drain the old node at once. Karpenter
   does not wait for a replacement, so there is nothing to gate.
 - **Only the new node is warmed.** The scheduler places the evicted pods. A pod that lands on another existing node
-  pulls its images there.
+  pulls its images there. This includes the case where Karpenter starts no replacement because the pods fit on
+  existing nodes.
 - **The prediction is a superset.** The controller does not know which disrupted node a new node replaces. It pulls
   for all disrupted nodes whose pods fit the new node.
 - **Pods with `imagePullSecrets` are skipped.** The pull pod cannot read a secret of another namespace. Images that

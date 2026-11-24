@@ -193,7 +193,8 @@ func (r *Reconciler) start(ctx context.Context, node *corev1.Node, left time.Dur
 	}
 	imagesRequested.Add(float64(len(prediction.Images)))
 	log.FromContext(ctx).Info("started pull", "pod", pod.Name, "images", prediction.Images,
-		"disruptedNodes", sources, "truncated", prediction.Truncated, "podsNeedingPullSecrets", prediction.NeedSecrets)
+		"disruptedNodes", sources, "truncated", prediction.Truncated,
+		"podsNeedingPullSecrets", prediction.NeedSecrets, "unpullableImages", prediction.Unpullable)
 	r.Recorder.Eventf(node, pod, corev1.EventTypeNormal, "PrepullStarted", "Prepull",
 		"pulling %d images used by pods on %d disrupted nodes", len(prediction.Images), sources)
 	return ctrl.Result{RequeueAfter: left}, nil

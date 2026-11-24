@@ -101,3 +101,24 @@ func TestPredictSkipsPresentImagesAndKeepsTheMostUsed(t *testing.T) {
 		t.Errorf("Truncated = %d, want 1", got.Truncated)
 	}
 }
+
+func TestPredictSkipsAnImageThatAlreadyFailsToPull(t *testing.T) {
+	pods := []corev1.Pod{
+		testPod("healthy", nil, "app:1"),
+		testPod("broken", func(p *corev1.Pod) {
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:  "c",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}}
+		}, "app:missing-tag"),
+	}
+
+	got := Predict(targetNode(), pods, map[string]bool{startupKey: true}, 10)
+
+	if want := []string{"app:1"}; !reflect.DeepEqual(got.Images, want) {
+		t.Errorf("images = %v, want %v", got.Images, want)
+	}
+	if got.Unpullable != 1 {
+		t.Errorf("Unpullable = %d, want 1", got.Unpullable)
+	}
+}
