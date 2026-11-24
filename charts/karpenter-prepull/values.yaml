@@ -6,16 +6,20 @@ image:
 
 imagePullSecrets: []
 
-# Two replicas with leader election. While no replica runs, new nodes of the
-# gated NodePools keep their startup taint.
+# One replica starts pull pods. Every replica serves the eviction webhook.
+# While no replica runs, Karpenter drains nodes as it does without this chart.
 replicas: 2
 
-# Startup taint that gates a node. List the same key under startupTaints of
-# each NodePool to gate.
-startupTaintKey: karpenter-prepull.goldsky.com/pending
-
-# Longest time a pull may hold a node. The node is released when it passes.
+# Longest time evictions are held after a drain starts.
 timeout: 2m
+
+# Warm only nodes younger than this. Zero warms every node that the pods of a
+# draining node fit, at the cost of more pulls.
+targetNodeMaxAge: 15m
+
+webhook:
+  # Seconds the API server waits for the webhook before it lets the eviction pass.
+  timeoutSeconds: 2
 
 # Most images one pull pod pulls.
 maxImages: 30

@@ -1,21 +1,27 @@
 # karpenter-prepull
 
-`karpenter-prepull` pulls container images onto a Karpenter replacement node before Karpenter drains the old node.
+`karpenter-prepull` pulls container images onto a Karpenter replacement node before Karpenter evicts the pods of the
+old node.
 
 When Karpenter replaces a node, the evicted pods start on a node with an empty image cache. Each pod then waits for
 its images. For a workload that runs one replica, that wait is downtime. `karpenter-prepull` moves the pull ahead of
 the eviction, so the pods find their images on the new node.
+
+It needs no change to your NodePools, no agent on the nodes and no access to the container runtime. If it is down,
+Karpenter behaves as it does without it.
 
 ## How it works
 
 For drift and consolidation, Karpenter replaces a node in a fixed order:
 
 1. It puts the `karpenter.sh/disrupted` taint on the old node.
-2. It starts the replacement node and waits until the node is initialized.
-3. It drains the old node.
+2. It starts the replacement node and waits until the node is ready.
+3. It drains the old node: it evicts the pods through the Eviction API.
 
-A node is not initialized while it carries one of its [startup taints][startup-taints]. `karpenter-prepull` uses that
-as a gate:
+`karpenter-prepull` has two parts that use this order:
+
+- A **controller** starts a pull pod on each new node while step 2 runs.
+- A **webhook** on the Eviction API holds step 3 until the pull pods are done.
 
 ```mermaid
 sequenceDiagram
@@ -24,39 +30,55 @@ sequenceDiagram
     participant N as New node
     participant P as karpenter-prepull
     K->>O: taint karpenter.sh/disrupted
-    K->>N: launch with the startup taint
+    K->>N: launch
     P->>O: read the pods and their images
-    P->>N: create one pull pod
+    P->>N: create a pull pod
+    K->>O: evict pod
+    P-->>K: 429, the pull is still running
     N-->>P: pull pod succeeded
-    P->>N: remove the startup taint
-    K->>O: drain
+    K->>O: evict pod (retry)
+    P-->>K: allowed
     Note over N: the evicted pods start from the image cache
 ```
 
-The pull pod is an ordinary pod that is bound to the new node. It has one container per predicted image. Each
-container runs a small static binary from a shared volume and exits. So the kubelet pulls every image with the
-credentials the node already has, and the pod succeeds when all pulls are done.
+The pull pod is an ordinary pod that is bound to the new node. It has one container per image. Each container runs a
+small static binary from a shared volume and exits. So the kubelet pulls every image with the credentials the node
+already has, and the pod finishes when all pulls are done.
 
-The controller needs no access to the container runtime and runs no agent on the nodes.
+The webhook answers a held eviction with HTTP 429, which is also the answer for an eviction that a
+PodDisruptionBudget blocks. Karpenter and `kubectl drain` both retry it.
+
+### Which nodes it warms
+
+The controller acts on a node when both are true:
+
+- The node carries the `karpenter.sh/disrupted` taint.
+- Its NodeClaim has the `DisruptionReason` condition. Karpenter sets it for drift and consolidation, where it starts
+  the replacement first.
+
+It then warms every node that is younger than `targetNodeMaxAge` (default `15m`) and is not itself disrupted,
+cordoned or being deleted. A replacement node is always in that set. Set `targetNodeMaxAge` to `0` to warm every node
+that the pods fit.
 
 ### Which images it pulls
 
-The controller looks at every node that carries the `karpenter.sh/disrupted` taint. It takes the pods on those nodes
-that could run on the new node: the node selector and the required node affinity match, and the pod tolerates the
-taints of the new node. It skips DaemonSet pods, static pods and finished pods. It pulls the images of the remaining
-pods that the new node does not hold, most used first. It leaves out an image that a pod on a disrupted node
-already fails to pull, because that pull would hold the node until the timeout.
-
-A node that starts while no node is disrupted is released at once. A scale-up node is not delayed.
+The controller takes the pods on the old node that could run on the new node: the node selector and the required
+node affinity match, and the pod tolerates the taints of the new node. It skips DaemonSet pods, static pods and
+finished pods. It pulls the images of the remaining pods that the new node does not hold, most used first. It leaves
+out an image that a pod already fails to pull.
 
 ### It fails open
 
-A node never keeps the startup taint for more than `timeout` (default `2m`) after it registers, as long as the
-controller runs. When the time is up, the controller removes the taint and Karpenter continues. The pods then pull
-what is missing, as they do without this controller.
+The webhook holds an eviction only while a pull pod for that pod's images is running. In every other case the
+eviction passes:
 
-The controller releases the node at once when the pull pod fails, or when the API server rejects the pull pod, for
-example because of an admission policy.
+- No pull pod exists, for example because the controller is down or an admission policy rejected the pull pod.
+- The pull pod finished or failed.
+- More than `timeout` (default `2m`) passed since the drain started.
+- The pod is not part of a Karpenter drift or consolidation.
+
+The webhook is registered with `failurePolicy: Ignore` and a 2-second timeout. If no replica answers, the API server
+lets the eviction pass. So an outage of `karpenter-prepull` costs the warm-up and nothing else.
 
 ## Install
 
@@ -65,40 +87,24 @@ helm install karpenter-prepull oci://ghcr.io/goldsky-io/charts/karpenter-prepull
   --namespace karpenter-prepull --create-namespace
 ```
 
-Then add the startup taint to each NodePool that you want to gate:
-
-```yaml
-apiVersion: karpenter.sh/v1
-kind: NodePool
-spec:
-  template:
-    spec:
-      startupTaints:
-        - key: karpenter-prepull.goldsky.com/pending
-          effect: NoSchedule
-```
-
-Install the controller before you add the taint. See [Operate it](#operate-it).
-
-> [!WARNING]
-> A change to `startupTaints` changes the NodePool template. Karpenter treats the existing nodes of that NodePool as
-> drifted and replaces them. Add a `Drifted` budget of `nodes: "0"` first if you want to control when that happens.
+That is all. The chart creates the webhook and a self-signed certificate for it.
 
 ## Configure
 
 | Chart value | Default | Meaning |
 | -- | -- | -- |
-| `startupTaintKey` | `karpenter-prepull.goldsky.com/pending` | Taint that gates a node. |
-| `timeout` | `2m` | Longest time a node keeps the startup taint after it registers. |
+| `timeout` | `2m` | Longest time evictions are held after a drain starts. Also the deadline of a pull pod. |
+| `targetNodeMaxAge` | `15m` | Warm only nodes younger than this. `0` warms every node the pods fit. |
 | `maxImages` | `30` | Most images one pull pod pulls. |
 | `ignoreTaintKeys` | `[]` | Startup taints of other components. See below. |
+| `webhook.timeoutSeconds` | `2` | Seconds the API server waits for the webhook. |
 | `pullPod.hostNetwork` | `false` | Run pull pods on the host network. |
 | `pullPod.priorityClassName` | `""` | Priority class of the pull pods. |
-| `replicas` | `2` | Controller replicas. One is active. |
+| `replicas` | `2` | Replicas. One starts pull pods. All serve the webhook. |
 
-**Other startup taints.** If a NodePool has startup taints of other components (a CNI or CSI agent, for example),
-list their keys in `ignoreTaintKeys`. The new node still carries those taints when the controller looks at it. Without
-the setting, the controller decides that the pods cannot run there and pulls nothing. Taints under
+**Startup taints of other components.** If a NodePool has startup taints (a CNI or CSI agent, for example), list
+their keys in `ignoreTaintKeys`. A new node still carries those taints when the controller looks at it. Without the
+setting, the controller decides that the pods cannot run there and pulls nothing. Taints under
 `node.kubernetes.io/`, `node.cloudprovider.kubernetes.io/` and `karpenter.sh/` are always ignored.
 
 **Host network.** By default a pull pod waits for the CNI to assign it a pod IP, which can take a while on a node
@@ -108,40 +114,28 @@ no-op binary, as a non-root user, with no capabilities and a read-only root file
 
 ## Operate it
 
-**While the controller is down, gated nodes stay gated.** Karpenter does not remove a startup taint and does not
-replace a node that keeps one. If no replica of the controller runs, new nodes of the gated NodePools accept no pods.
-Run two replicas (the default) and alert on this condition. For example, alert when a node has carried the startup
-taint for more than five minutes:
-
-```promql
-max by (node) (kube_node_spec_taint{key="karpenter-prepull.goldsky.com/pending"}) == 1
-```
-
-To release a node by hand:
-
-```sh
-kubectl taint node <node> karpenter-prepull.goldsky.com/pending-
-```
-
-**Metrics.** The controller serves Prometheus metrics on port `8080`.
+**Metrics.** Each replica serves Prometheus metrics on port `8080`.
 
 | Metric | Meaning |
 | -- | -- |
-| `karpenter_prepull_releases_total{result}` | Nodes released. `result` is `pulled`, `nothing_to_pull`, `timeout` or `failed`. |
-| `karpenter_prepull_pull_duration_seconds{result}` | Time from the creation of the pull pod to the release. |
+| `karpenter_prepull_pull_pods_created_total` | Pull pods created. |
 | `karpenter_prepull_images_requested_total` | Images that pull pods were asked to pull. |
+| `karpenter_prepull_evictions_total{decision}` | Evictions from nodes that Karpenter drains by choice. `decision` is `allowed`, `held` or `timeout`. |
 
-**Events.** The controller records `PrepullStarted` and `PrepullReleased` events on the node.
+A rising `timeout` count means pulls are slower than `timeout`. The evictions pass anyway.
+
+**Events.** The controller records `PrepullStarted` and `PrepullFailed` events on the old node. While an eviction is
+held, Karpenter reports `FailedDraining` on the node with a PodDisruptionBudget message. That is how Karpenter words
+every 429 answer.
+
+**Roll time.** A held drain makes each node replacement longer by about the time of the pulls.
 
 ## Limits
 
 - **Forceful disruption is not covered.** Spot interruption and node expiry drain the old node at once. Karpenter
-  does not wait for a replacement, so there is nothing to gate.
-- **Only the new node is warmed.** The scheduler places the evicted pods. A pod that lands on another existing node
-  pulls its images there. This includes the case where Karpenter starts no replacement because the pods fit on
-  existing nodes.
-- **The prediction is a superset.** The controller does not know which disrupted node a new node replaces. It pulls
-  for all disrupted nodes whose pods fit the new node.
+  starts no replacement first, so there is no node to warm.
+- **Only new nodes are warmed by default.** The scheduler places the evicted pods. A pod that lands on an older node
+  pulls its images there. `targetNodeMaxAge: 0` removes this limit at the cost of more pulls.
 - **Pods with `imagePullSecrets` are skipped.** The pull pod cannot read a secret of another namespace. Images that
   the node can pull with its own credentials work, for example through a kubelet credential provider.
 - **`imagePullPolicy: Always` still contacts the registry.** The layers are cached, so the pull is short. If a
@@ -152,11 +146,14 @@ kubectl taint node <node> karpenter-prepull.goldsky.com/pending-
 
 | Scope | Resource | Verbs | Why |
 | -- | -- | -- | -- |
-| Cluster | `nodes` | get, list, watch, patch | Find gated and disrupted nodes. Remove the startup taint. |
-| Cluster | `pods` | get, list, watch | Read the pods on disrupted nodes. |
+| Cluster | `nodes` | get, list, watch | Find draining nodes and new nodes. |
+| Cluster | `nodeclaims.karpenter.sh` | get, list, watch | Read why Karpenter disrupts a node. |
+| Cluster | `pods` | get, list, watch | Read the pods on draining nodes. |
 | Cluster | `events.events.k8s.io` | create, patch | Record events on nodes. |
 | Own namespace | `pods` | create, delete | Manage pull pods. |
 | Own namespace | `leases`, `events` | all, create | Leader election. |
+
+The controller changes no node and no workload. Its only writes outside its namespace are events.
 
 ## Develop
 
@@ -169,5 +166,3 @@ docker build .
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
-[startup-taints]: https://karpenter.sh/docs/concepts/nodepools/#spectemplatespecstartuptaints

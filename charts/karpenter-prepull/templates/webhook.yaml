@@ -1,0 +1,74 @@
+{{- $name := printf "%s-webhook" .Release.Name -}}
+{{- $host := printf "%s.%s.svc" $name .Release.Namespace -}}
+{{- $ca := "" -}}
+{{- $crt := "" -}}
+{{- $key := "" -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
+{{- if $existing -}}
+{{- $ca = index $existing.data "ca.crt" -}}
+{{- $crt = index $existing.data "tls.crt" -}}
+{{- $key = index $existing.data "tls.key" -}}
+{{- else -}}
+{{- $authority := genCA "karpenter-prepull" 3650 -}}
+{{- $cert := genSignedCert $host nil (list $host (printf "%s.cluster.local" $host)) 3650 $authority -}}
+{{- $ca = $authority.Cert | b64enc -}}
+{{- $crt = $cert.Cert | b64enc -}}
+{{- $key = $cert.Key | b64enc -}}
+{{- end -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: karpenter-prepull
+    app.kubernetes.io/instance: {{ .Release.Name }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $ca }}
+  tls.crt: {{ $crt }}
+  tls.key: {{ $key }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: karpenter-prepull
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app.kubernetes.io/name: karpenter-prepull
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: karpenter-prepull
+    app.kubernetes.io/instance: {{ .Release.Name }}
+webhooks:
+  - name: evictions.karpenter-prepull.goldsky.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # An outage of the webhook must never block a drain.
+    failurePolicy: Ignore
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    clientConfig:
+      caBundle: {{ $ca }}
+      service:
+        name: {{ $name }}
+        namespace: {{ .Release.Namespace }}
+        path: /evictions
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/eviction"]
+        scope: Namespaced
